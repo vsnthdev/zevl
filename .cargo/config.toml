@@ -1,0 +1,8 @@
+# `cargo run` re-signs the binary with the local development identity first,
+# otherwise macOS asks for the login password on every rebuild because the
+# ad-hoc code signature changes.
+[target.aarch64-apple-darwin]
+runner = "scripts/sign-and-run.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/sign-and-run.sh"
