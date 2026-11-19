@@ -1,6 +1,7 @@
 // searches open pull requests across a personal account or an organization.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local};
 use serde::Deserialize;
 
 use crate::github;
@@ -35,6 +36,8 @@ pub struct PullRequest {
     pub repository: String,
     pub title: String,
     pub author: String,
+    /// when the pull request was last updated, as local `YYYY-MM-DD HH:MM`.
+    pub updated: String,
 }
 
 impl PullRequest {
@@ -110,8 +113,21 @@ impl From<SearchItem> for PullRequest {
             repository,
             title: item.title,
             author,
+            updated: format_updated(&item.updated_at),
         }
     }
+}
+
+/// renders GitHub's RFC 3339 `updated_at` as local `YYYY-MM-DD HH:MM`.
+fn format_updated(updated_at: &str) -> String {
+    DateTime::parse_from_rfc3339(updated_at)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| updated_at.to_string())
 }
 
 #[derive(Deserialize)]
@@ -124,6 +140,7 @@ struct SearchItem {
     number: u64,
     title: String,
     repository_url: String,
+    updated_at: String,
     user: Option<SearchUser>,
 }
 
@@ -143,6 +160,7 @@ mod tests {
             repository: "mantu".to_string(),
             title: "Fix the thing".to_string(),
             author: "vsnthdev".to_string(),
+            updated: "2026-11-19 10:42".to_string(),
         }
     }
 
@@ -168,6 +186,7 @@ mod tests {
             number: 7,
             title: "Fix the thing".to_string(),
             repository_url: "https://api.github.com/repos/introbotai/cluster-admin".to_string(),
+            updated_at: "2026-11-19T10:42:00Z".to_string(),
             user: Some(SearchUser {
                 login: "vsnthdev".to_string(),
             }),
@@ -176,5 +195,26 @@ mod tests {
         let pull_request = PullRequest::from(item);
         assert_eq!(pull_request.owner, "introbotai");
         assert_eq!(pull_request.repository, "cluster-admin");
+    }
+
+    #[test]
+    fn updated_timestamp_is_rendered_as_date_and_time() {
+        let item = SearchItem {
+            number: 7,
+            title: "Fix the thing".to_string(),
+            repository_url: "https://api.github.com/repos/introbotai/cluster-admin".to_string(),
+            updated_at: "2026-11-19T10:42:00Z".to_string(),
+            user: None,
+        };
+
+        let pull_request = PullRequest::from(item);
+        assert_eq!(pull_request.updated.len(), 16, "YYYY-MM-DD HH:MM");
+        assert!(pull_request.updated.contains(':'));
+        assert!(!pull_request.updated.contains('T'));
+    }
+
+    #[test]
+    fn unparseable_timestamps_are_kept_as_is() {
+        assert_eq!(format_updated("not a timestamp"), "not a timestamp");
     }
 }

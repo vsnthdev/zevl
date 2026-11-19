@@ -12,7 +12,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Cell, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -42,6 +42,26 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 /// how often the browser wakes up while refreshing to animate the spinner and
 /// poll for the finished fetch.
 const REFRESH_TICK: Duration = Duration::from_millis(120);
+
+/// blue used for borders, headers, and key hints.
+const ACCENT: Color = Color::Rgb(137, 180, 250);
+/// mauve used for the account scope in the search title.
+const SCOPE: Color = Color::Rgb(203, 166, 247);
+/// green used for pull request counts and successful notices.
+const SUCCESS: Color = Color::Rgb(166, 227, 161);
+/// yellow used for filtered counts, spinners, and the quit key.
+const WARNING: Color = Color::Rgb(249, 226, 175);
+/// red used for error notices.
+const ERROR: Color = Color::Rgb(243, 139, 168);
+/// gray used for hint text and inactive title arrows.
+const MUTED: Color = Color::Rgb(147, 153, 178);
+/// background of the highlighted table row.
+const SELECTION_BG: Color = Color::Rgb(45, 74, 110);
+/// foreground of the highlighted table row.
+const SELECTION_FG: Color = Color::Rgb(205, 214, 244);
+/// blank display columns kept after the last table column so panning can
+/// reveal it clear of the scrollbar and the right border.
+const TRAILING_PADDING: usize = 2;
 
 /// re-fetches the current open pull requests for a scope, used by the `R`
 /// refresh shortcut.
@@ -99,6 +119,8 @@ struct App {
     number_width: usize,
     repository_width: usize,
     author_width: usize,
+    title_width: usize,
+    updated_width: usize,
     /// repeats the original fetch when the user presses `R`.
     fetch: RefreshFn,
     /// launches the highlighted pull request when the user presses `enter`.
@@ -132,6 +154,8 @@ impl App {
             number_width: 0,
             repository_width: 0,
             author_width: 0,
+            title_width: 0,
+            updated_width: 0,
             fetch: refresh,
             open,
             refresh: None,
@@ -168,6 +192,20 @@ impl App {
             .max()
             .unwrap_or(0)
             .max("AUTHOR".len());
+        self.title_width = self
+            .pull_requests
+            .iter()
+            .map(|pull_request| UnicodeWidthStr::width(pull_request.title.as_str()))
+            .max()
+            .unwrap_or(0)
+            .max("TITLE".len());
+        self.updated_width = self
+            .pull_requests
+            .iter()
+            .map(|pull_request| UnicodeWidthStr::width(pull_request.updated.as_str()))
+            .max()
+            .unwrap_or(0)
+            .max("UPDATED".len());
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<Vec<String>> {
@@ -453,12 +491,25 @@ impl App {
     }
 
     fn draw_search(&mut self, frame: &mut Frame, area: Rect) {
-        let title = format!(
-            " zevl · {} · {} open pull requests ",
-            self.scope,
-            self.pull_requests.len()
-        );
-        let block = Block::bordered().title(title);
+        let title = Line::from(vec![
+            Span::styled(
+                " zevl ",
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("· ", Style::new().fg(MUTED)),
+            Span::styled(
+                self.scope.clone(),
+                Style::new().fg(SCOPE).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" · ", Style::new().fg(MUTED)),
+            Span::styled(
+                format!("{} open pull requests ", self.pull_requests.len()),
+                Style::new().fg(SUCCESS),
+            ),
+        ]);
+        let block = Block::bordered()
+            .border_style(Style::new().fg(ACCENT))
+            .title(title);
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
@@ -470,7 +521,7 @@ impl App {
         let scroll = self.input.visual_scroll(width);
 
         let line = if self.input.value().is_empty() {
-            Line::from("type to filter").dim()
+            Line::from("type to filter").fg(MUTED)
         } else {
             Line::from(self.input.value())
         };
@@ -481,7 +532,7 @@ impl App {
     }
 
     fn draw_table(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::bordered();
+        let block = Block::bordered().border_style(Style::new().fg(ACCENT));
         let inner = block.inner(area);
         self.viewport = inner.height as usize;
 
@@ -491,32 +542,28 @@ impl App {
         if budget < MIN_BUDGET || self.matched.is_empty() {
             self.offset = 0;
             self.max_offset = 0;
-            let message = if budget < MIN_BUDGET {
-                "too narrow"
+            let (message, color) = if budget < MIN_BUDGET {
+                ("too narrow", WARNING)
             } else if self.input.value().is_empty() {
-                "no open pull requests"
+                ("no open pull requests", MUTED)
             } else {
-                "no pull requests match your search"
+                ("no pull requests match your search", WARNING)
             };
             frame.render_widget(block.title(self.table_title()), area);
-            frame.render_widget(Paragraph::new(message).centered().dim(), inner);
+            frame.render_widget(
+                Paragraph::new(Line::from(message).fg(color)).centered(),
+                inner,
+            );
             return;
         }
 
         // the whole table pans: the viewport slides across the widest row and
         // content is only ever cut at the terminal edges, never ellipsized.
-        let widest_title = self
-            .matched
-            .iter()
-            .map(|index| UnicodeWidthStr::width(self.pull_requests[*index].title.as_str()))
-            .max()
-            .unwrap_or(0);
-        let widest = widest_title.max(UnicodeWidthStr::width("TITLE"));
-        self.max_offset = (self.fixed_width() + widest).saturating_sub(budget);
+        self.max_offset = self.fixed_width().saturating_sub(budget);
         self.offset = self.offset.min(self.max_offset);
 
         let header = Row::new([Cell::from(slice(&self.table_header(), self.offset, budget))])
-            .style(Style::new().bold());
+            .style(Style::new().fg(ACCENT).add_modifier(Modifier::BOLD));
 
         let rows = self
             .matched
@@ -532,7 +579,12 @@ impl App {
 
         let table = Table::new(rows, [Constraint::Fill(1)])
             .header(header)
-            .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD))
+            .row_highlight_style(
+                Style::new()
+                    .bg(SELECTION_BG)
+                    .fg(SELECTION_FG)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("▶ ")
             .highlight_spacing(HighlightSpacing::Always)
             .block(block.title(self.table_title()));
@@ -551,6 +603,8 @@ impl App {
                 .viewport_content_length(self.viewport);
             frame.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .thumb_style(Style::new().fg(ACCENT))
+                    .track_style(Style::new().fg(MUTED))
                     .begin_symbol(None)
                     .end_symbol(None),
                 scrollbar_area,
@@ -565,30 +619,39 @@ impl App {
         // the notice leads so it stays visible on narrow terminals.
         if let Some(notice) = &self.notice {
             let (message, style) = match notice {
-                Notice::Opened(reference) => (format!("opened {reference}"), Style::new().green()),
-                Notice::Error(message) => (message.clone(), Style::new().red()),
+                Notice::Opened(reference) => (
+                    format!("opened {reference}"),
+                    Style::new().fg(SUCCESS).add_modifier(Modifier::BOLD),
+                ),
+                Notice::Error(message) => (
+                    message.clone(),
+                    Style::new().fg(ERROR).add_modifier(Modifier::BOLD),
+                ),
             };
             spans.push(Span::styled(message, style));
-            spans.push(" · ".dim());
+            spans.push(Span::styled(" · ", Style::new().fg(MUTED)));
         }
 
+        let key = Style::new().fg(ACCENT).add_modifier(Modifier::BOLD);
+        let hint = Style::new().fg(MUTED);
+
         spans.extend([
-            "↑/↓".bold(),
-            " move · ".dim(),
-            "pgup/pgdn".bold(),
-            " jump · ".dim(),
+            Span::styled("↑/↓", key),
+            Span::styled(" move · ", hint),
+            Span::styled("pgup/pgdn", key),
+            Span::styled(" jump · ", hint),
         ]);
         if self.max_offset > 0 {
-            spans.push("shift+←/→".bold());
-            spans.push(" pan · ".dim());
+            spans.push(Span::styled("shift+←/→", key));
+            spans.push(Span::styled(" pan · ", hint));
         }
         spans.extend([
-            "R".bold(),
-            " refresh · ".dim(),
-            "enter".bold(),
-            " open · ".dim(),
-            "esc".bold(),
-            " quit".dim(),
+            Span::styled("R", key),
+            Span::styled(" refresh · ", hint),
+            Span::styled("enter", key),
+            Span::styled(" open · ", hint),
+            Span::styled("esc", Style::new().fg(WARNING).add_modifier(Modifier::BOLD)),
+            Span::styled(" quit", hint),
         ]);
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
@@ -596,68 +659,88 @@ impl App {
     /// the table block title, with a spinner while refreshing and arrows that
     /// light up while rows can pan.
     fn table_title(&self) -> Line<'static> {
-        let mut label = if self.input.value().is_empty() {
-            format!(" {} open pull requests ", self.matched.len())
-        } else {
+        let filtered = !self.input.value().is_empty();
+        let label = if filtered {
             format!(
                 " {} of {} pull requests ",
                 self.matched.len(),
                 self.pull_requests.len()
             )
+        } else {
+            format!(" {} open pull requests ", self.matched.len())
+        };
+        let label_style = if filtered {
+            Style::new().fg(WARNING)
+        } else {
+            Style::new().fg(SUCCESS)
         };
 
+        let mut spans = Vec::new();
         if self.refresh.is_some() {
             let frame = SPINNER[self.spinner % SPINNER.len()];
-            label = format!("{frame} {label}");
+            spans.push(Span::styled(format!("{frame} "), Style::new().fg(WARNING)));
         }
+        spans.push(Span::styled(label, label_style));
 
         if self.max_offset == 0 {
-            return Line::from(label);
+            return Line::from(spans);
         }
 
-        let dim = Style::new().add_modifier(Modifier::DIM);
         let left = if self.offset > 0 {
-            Span::raw("◂")
+            Span::styled("◂", Style::new().fg(ACCENT))
         } else {
-            Span::styled("◂", dim)
+            Span::styled("◂", Style::new().fg(MUTED).add_modifier(Modifier::DIM))
         };
         let right = if self.offset < self.max_offset {
-            Span::raw("▸")
+            Span::styled("▸", Style::new().fg(ACCENT))
         } else {
-            Span::styled("▸", dim)
+            Span::styled("▸", Style::new().fg(MUTED).add_modifier(Modifier::DIM))
         };
 
-        Line::from(vec![left, Span::raw(label), right])
+        let mut line = vec![left];
+        line.extend(spans);
+        line.push(right);
+        Line::from(line)
     }
 
     /// the header row, aligned with the data columns and pannable with them.
     fn table_header(&self) -> String {
         format!(
-            "{:>number$}{SPACES}{}{SPACES}{}{SPACES}TITLE",
+            "{:>number$}{SPACES}{}{SPACES}{}{SPACES}{}{SPACES}{}",
             "#",
             pad("REPOSITORY", self.repository_width),
             pad("AUTHOR", self.author_width),
+            pad("TITLE", self.title_width),
+            pad("UPDATED", "UPDATED".len() + TRAILING_PADDING),
             number = self.number_width,
         )
     }
 
     /// the full, unpanned row for `index`: fixed width columns joined by
-    /// `SPACES`, the title last and unbounded.
+    /// `SPACES`, with the updated date and time last.
     fn row_line(&self, index: usize) -> String {
         let pull_request = &self.pull_requests[index];
         format!(
-            "{:>number$}{SPACES}{}{SPACES}{}{SPACES}{}",
+            "{:>number$}{SPACES}{}{SPACES}{}{SPACES}{}{SPACES}{}",
             pull_request.number,
             pad(&pull_request.repository, self.repository_width),
             pad(&pull_request.author, self.author_width),
-            pull_request.title,
+            pad(&pull_request.title, self.title_width),
+            pad(&pull_request.updated, self.updated_width + TRAILING_PADDING),
             number = self.number_width,
         )
     }
 
-    /// columns before `TITLE`, including the spacing between them.
+    /// total width of every column, including the spacing between them and
+    /// the blank padding after the last column.
     fn fixed_width(&self) -> usize {
-        self.number_width + self.repository_width + self.author_width + SPACING * 3
+        self.number_width
+            + self.repository_width
+            + self.author_width
+            + self.title_width
+            + self.updated_width
+            + TRAILING_PADDING
+            + SPACING * 4
     }
 }
 
@@ -726,6 +809,7 @@ mod tests {
             repository: repository.to_string(),
             title: title.to_string(),
             author: author.to_string(),
+            updated: "2026-11-19 10:42".to_string(),
         }
     }
 
@@ -1012,7 +1096,11 @@ mod tests {
 
         assert_eq!(
             app.table_header(),
-            "  #  REPOSITORY      AUTHOR            TITLE"
+            format!(
+                "  #  REPOSITORY      AUTHOR            {:<37}  UPDATED{}",
+                "TITLE",
+                " ".repeat(TRAILING_PADDING)
+            )
         );
     }
 
@@ -1023,8 +1111,13 @@ mod tests {
 
         assert_eq!(
             app.row_line(2),
-            " 14  zyntra          tanisheesh        forward webhook data"
+            format!(
+                " 14  zyntra          tanisheesh        {:<37}  2026-11-19 10:42{}",
+                "forward webhook data",
+                " ".repeat(TRAILING_PADDING)
+            )
         );
+        assert_eq!(app.row_line(2).len(), app.fixed_width());
     }
 
     #[test]
@@ -1051,7 +1144,7 @@ mod tests {
         let content = render(&mut app, 120, 12);
 
         let mut position = 0;
-        for header in ["#", "REPOSITORY", "AUTHOR", "TITLE"] {
+        for header in ["#", "REPOSITORY", "AUTHOR", "TITLE", "UPDATED"] {
             let found = content[position..]
                 .find(header)
                 .unwrap_or_else(|| panic!("missing {header} header after {position}: {content}"));
@@ -1069,7 +1162,8 @@ mod tests {
         assert!(content.contains("416"));
         assert!(content.contains("cluster-admin"));
         assert!(content.contains("show india company ranking completion"));
-        assert!(!content.contains("UPDATED"));
+        assert!(content.contains("UPDATED"));
+        assert!(content.contains("2026-11-19 10:42"));
     }
 
     #[test]
@@ -1082,6 +1176,34 @@ mod tests {
 
         assert!(content.contains("fix fix"));
         assert!(!content.contains('…'), "nothing is ellipsized: {content}");
+    }
+
+    #[test]
+    fn the_browser_chrome_uses_the_accent_palette() {
+        let pull_requests = pull_requests();
+        let mut app = app(&pull_requests);
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).expect("terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw");
+        let cells = terminal.backend().buffer().content();
+
+        let brand = cells
+            .iter()
+            .find(|cell| cell.symbol() == "z")
+            .expect("the zevl brand is on screen");
+        assert_eq!(brand.fg, ACCENT, "the brand uses the accent color");
+
+        let header = cells
+            .iter()
+            .find(|cell| cell.symbol() == "#")
+            .expect("the table header is on screen");
+        assert_eq!(header.fg, ACCENT, "the header uses the accent color");
+
+        let selection = cells
+            .iter()
+            .find(|cell| cell.symbol() == "▶")
+            .expect("the selection marker is on screen");
+        assert_eq!(selection.bg, SELECTION_BG, "the selected row is tinted");
+        assert_eq!(selection.fg, SELECTION_FG);
     }
 
     #[test]
