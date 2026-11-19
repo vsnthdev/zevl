@@ -13,15 +13,21 @@ mod tui;
 /// A command line application.
 #[derive(Debug, Parser)]
 #[command(name = "zevl", version, about)]
+#[command(args_conflicts_with_subcommands = true)]
 struct Cli {
+    // the `list` options are flattened into the root command so that a bare
+    // `zevl` invocation behaves exactly like `zevl list`, flags included.
+    #[command(flatten)]
+    list: list::ListArgs,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// List the GitHub organizations you have access to.
-    List,
+    /// List open pull requests in your personal account or an organization.
+    List(list::ListArgs),
     /// Log in to GitHub with a device code.
     Login,
 }
@@ -44,7 +50,35 @@ fn run() -> Result<()> {
 
     match cli.command {
         Some(Command::Login) => auth::login(),
-        // `list` is the default action when no subcommand is given.
-        Some(Command::List) | None => list::list(),
+        Some(Command::List(args)) => list::list(args),
+        // a bare `zevl` invocation is an alias for `zevl list`.
+        None => list::list(cli.list),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bare_invocation_accepts_the_list_options() {
+        let cli = Cli::try_parse_from(["zevl", "--scope", "introbotai"])
+            .expect("the root command should accept list options");
+
+        assert!(cli.command.is_none());
+        assert_eq!(cli.list.scope.as_deref(), Some("introbotai"));
+    }
+
+    #[test]
+    fn list_subcommand_accepts_the_shared_list_options() {
+        let cli = Cli::try_parse_from(["zevl", "list", "--scope", "introbotai"])
+            .expect("the list subcommand should accept the shared options");
+
+        match cli.command {
+            Some(Command::List(args)) => {
+                assert_eq!(args.scope.as_deref(), Some("introbotai"));
+            }
+            _ => panic!("expected the list subcommand"),
+        }
     }
 }

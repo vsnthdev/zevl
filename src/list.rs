@@ -1,4 +1,5 @@
-// lets the user pick an account, then fuzzy search its open pull requests.
+// lists open pull requests for an organization (or a picked account), then
+// hands them to a fuzzy searchable browser.
 
 use std::sync::Arc;
 
@@ -13,7 +14,16 @@ use crate::tui;
 const ORGS_URL: &str = "https://api.github.com/user/orgs";
 const PER_PAGE: usize = 100;
 
-pub fn list() -> Result<()> {
+/// options accepted by `zevl list`, also flattened into the root `zevl`
+/// command because a bare `zevl` invocation is an alias for `list`.
+#[derive(Debug, Default, clap::Args)]
+pub struct ListArgs {
+    /// Skip the organization picker and list pull requests in this organization.
+    #[arg(long, value_name = "SCOPE")]
+    pub scope: Option<String>,
+}
+
+pub fn list(args: ListArgs) -> Result<()> {
     let spinner = cliclack::spinner();
     spinner.start("checking your GitHub session");
 
@@ -22,39 +32,49 @@ pub fn list() -> Result<()> {
         bail!("you're not authenticated with GitHub, run `zevl login` first");
     };
 
-    spinner.set_message("fetching your organizations");
-    let orgs = match fetch_orgs(&session.token) {
-        Ok(orgs) => orgs,
-        Err(error) => {
-            spinner.error("failed to fetch your organizations");
-            return Err(error);
+    let (scope, scope_label) = match args.scope {
+        // the organization was given up front, so skip discovering the user's
+        // organizations and the interactive picker entirely.
+        Some(org) => {
+            spinner.stop(format!("using the {org} organization"));
+            (Scope::Organization(org.clone()), org)
         }
-    };
-    spinner.stop("fetched your GitHub account and organizations");
+        None => {
+            spinner.set_message("fetching your organizations");
+            let orgs = match fetch_orgs(&session.token) {
+                Ok(orgs) => orgs,
+                Err(error) => {
+                    spinner.error("failed to fetch your organizations");
+                    return Err(error);
+                }
+            };
+            spinner.stop("fetched your GitHub account and organizations");
 
-    let mut items = Vec::with_capacity(orgs.len() + 1);
-    items.push((
-        session.login.clone(),
-        session.login.clone(),
-        "personal account",
-    ));
+            let mut items = Vec::with_capacity(orgs.len() + 1);
+            items.push((
+                session.login.clone(),
+                session.login.clone(),
+                "personal account",
+            ));
 
-    for org in orgs {
-        items.push((org.login.clone(), org.login.clone(), "organization"));
-    }
+            for org in orgs {
+                items.push((org.login.clone(), org.login.clone(), "organization"));
+            }
 
-    let selected = cliclack::select("select an account")
-        .items(&items)
-        .interact()?;
+            let selected = cliclack::select("select an account")
+                .items(&items)
+                .interact()?;
 
-    let (scope, scope_label) = if selected == session.login {
-        (
-            Scope::Personal(selected),
-            "your personal account".to_string(),
-        )
-    } else {
-        let label = selected.clone();
-        (Scope::Organization(selected), label)
+            if selected == session.login {
+                (
+                    Scope::Personal(selected),
+                    "your personal account".to_string(),
+                )
+            } else {
+                let label = selected.clone();
+                (Scope::Organization(selected), label)
+            }
+        }
     };
 
     let spinner = cliclack::spinner();
